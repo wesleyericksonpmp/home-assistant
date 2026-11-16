@@ -1,0 +1,165 @@
+blueprint:
+  name: Find My Phone (repeating critical alert)
+  description: >-
+    Turn on a toggle to ring a phone through the Home Assistant Companion app.
+    The alert repeats until the toggle turns off. You can stop it with the
+    Turn Off button on the notification (press and hold on iOS), by turning
+    the toggle off, or by letting the time limit run out. Each new alert
+    replaces the last one, and the alert is cleared from the phone when it
+    stops.
+
+
+    Setup: create one Toggle helper per phone (Settings > Devices & services >
+    Helpers > Create helper > Toggle), then create one automation per phone
+    from this blueprint.
+
+
+    iOS: allow Critical Alerts for the Home Assistant app so the alert plays on
+    silent and Do Not Disturb. Android: the alert uses the alarm stream, which
+    plays at alarm volume.
+  domain: automation
+  author: Wesley Erickson
+  source_url: https://github.com/wesleyericksonpmp/home-assistant/blob/main/blueprints/automation/wesleyericksonpmp/find_my_phone.yaml
+  homeassistant:
+    min_version: "2024.10.0"
+  input:
+    phone:
+      name: Phone
+      description: The Companion app device to ring.
+      selector:
+        device:
+          filter:
+            - integration: mobile_app
+    find_toggle:
+      name: Find toggle
+      description: The Toggle helper that starts and stops the alert for this phone.
+      selector:
+        entity:
+          filter:
+            - domain: input_boolean
+    settings:
+      name: Settings
+      icon: mdi:cog
+      collapsed: true
+      input:
+        repeat_seconds:
+          name: Repeat every
+          default: 10
+          selector:
+            number:
+              min: 5
+              max: 120
+              unit_of_measurement: seconds
+              mode: box
+        time_limit_minutes:
+          name: Stop after
+          description: Turns the toggle off after this long if nobody stops it.
+          default: 5
+          selector:
+            number:
+              min: 1
+              max: 60
+              unit_of_measurement: minutes
+              mode: box
+        alert_title:
+          name: Title
+          default: "📍 Find My Phone"
+          selector:
+            text: {}
+        alert_message:
+          name: Message
+          default: Find your phone!
+          selector:
+            text: {}
+        button_title:
+          name: Button label
+          default: Turn Off
+          selector:
+            text: {}
+
+mode: parallel
+max: 10
+max_exceeded: silent
+
+variables:
+  phone: !input phone
+  find_toggle: !input find_toggle
+  repeat_seconds: !input repeat_seconds
+  alert_title: !input alert_title
+  alert_message: !input alert_message
+  button_title: !input button_title
+  phone_slug: "{{ device_attr(phone, 'name') | slugify }}"
+  stop_action: "FIND_PHONE_OFF_{{ phone_slug | upper }}"
+  alert_tag: "find_phone_{{ phone_slug }}"
+
+triggers:
+  - trigger: state
+    entity_id: !input find_toggle
+    to: "on"
+    id: start
+  - trigger: state
+    entity_id: !input find_toggle
+    to: "on"
+    for:
+      minutes: !input time_limit_minutes
+    id: time_limit
+  - trigger: event
+    event_type: mobile_app_notification_action
+    id: button
+
+conditions:
+  - condition: or
+    conditions:
+      - condition: trigger
+        id:
+          - start
+          - time_limit
+      - condition: template
+        value_template: "{{ trigger.event.data.action == stop_action }}"
+
+actions:
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: start
+        sequence:
+          - alias: Ring the phone until the toggle turns off
+            repeat:
+              while:
+                - condition: state
+                  entity_id: !input find_toggle
+                  state: "on"
+              sequence:
+                - domain: mobile_app
+                  type: notify
+                  device_id: !input phone
+                  title: "{{ alert_title }}"
+                  message: "{{ alert_message }}"
+                  data:
+                    tag: "{{ alert_tag }}"
+                    actions:
+                      - action: "{{ stop_action }}"
+                        title: "{{ button_title }}"
+                        destructive: true
+                    push:
+                      sound:
+                        name: default
+                        critical: 1
+                        volume: 1
+                    channel: alarm_stream
+                    priority: high
+                    ttl: 0
+                - delay:
+                    seconds: "{{ repeat_seconds }}"
+          - alias: Clear the alert from the phone
+            domain: mobile_app
+            type: notify
+            device_id: !input phone
+            message: clear_notification
+            data:
+              tag: "{{ alert_tag }}"
+    default:
+      - alias: Stop the alert (button pressed or time limit reached)
+        action: input_boolean.turn_off
+        target:
+          entity_id: !input find_toggle
